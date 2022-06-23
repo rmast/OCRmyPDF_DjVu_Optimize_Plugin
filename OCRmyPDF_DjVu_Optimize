@@ -1,0 +1,313 @@
+#!/usr/bin/python3
+# OCRmyPDF Optimizatopm plugin by Robert Mast inspired by James R. Barlow: github.com/jbarlow83, Merlijn Wajer <merlijn@archive.org>
+# enabling OCRmyPDF to optimize PDF's as good as Open Sourced parts of DjVu can do.
+# As some DjVu-software-patents have expired there might even be some additional room for improvement for anyone who is able to understand them deeply.
+
+"""Built-in plugin to implement PDF page optimization."""
+
+import argparse
+import logging
+from pathlib import Path
+from typing import (
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    MutableSet,
+    NamedTuple,
+    NewType,
+    Optional,
+    Sequence,
+    Tuple,
+)
+from ocrmypdf import PdfContext, hookimpl
+from ocrmypdf._concurrent import Executor, SerialExecutor
+from ocrmypdf._exec import jbig2enc, pngquant
+from ocrmypdf._pipeline import get_pdf_save_settings
+from ocrmypdf.cli import numeric
+from ocrmypdf.optimize import optimize
+from ocrmypdf.subprocess import check_external_program
+from subprocess import check_call, check_output
+import sys
+import os.path
+import tempfile
+import shutil
+import threading
+from collections import defaultdict
+from os import fspath
+from zlib import compress
+
+import img2pdf
+from pikepdf import (
+    Dictionary,
+    Name,
+    Object,
+    ObjectStreamMode,
+    Pdf,
+    PdfError,
+    PdfImage,
+    Stream,
+    UnsupportedImageTypeError,
+)
+from PIL import Image
+
+from ocrmypdf._jobcontext import PdfContext
+from ocrmypdf.exceptions import OutputFileAccessError
+from ocrmypdf.helpers import IMG2PDF_KWARGS, safe_symlink
+#from subprocess import check_call, check_output
+
+import os
+import io
+
+import fitz
+
+from hocr.parse import hocr_page_iterator, hocr_page_to_word_data
+from internetarchivepdf.const import DENOISE_FAST, JPEG2000_IMPL_KAKADU, \
+    JPEG2000_IMPL_PILLOW, COMPRESSOR_JPEG, COMPRESSOR_JPEG2000
+from internetarchivepdf.mrc import create_mrc_hocr_components, encode_mrc_images
+
+# TODO:
+# - Deal with arbitrary rotation and matrix sizes when placing the image back
+# - Decide if we want to ignore transparent images alltogether
+# - Give black/white images (1bit images) special treatment
+# - Stabilise and clean up the code, the many clean_contents
+# - 
+
+
+#from pymupdf examples
+def remove_images(doc, page, unwanted):
+    un_list = [b"/%s Do" % u.encode() for u in unwanted]
+    #page.clean_contents()  # unify / format the commands
+    xref=page.get_contents()[0]  # get its XREF
+    cont=page.read_contents().splitlines()  # read commands as list of lines
+    for i in range(len(cont)):  # walk thru the lines
+        if cont[i] in un_list:  # invokes an unwanted image
+            cont[i] = b""  # remove command
+    doc.update_stream(xref, b"\n".join(cont))  # replace cleaned command object
+    #page.clean_contents()  # removes now unreferenced images from page definition
+
+
+def compress_page_images(doc, page, hocr_word_data=[]):
+    page.clean_contents()
+    imgs = page.get_images(full=True)
+
+    to_remove_xrefs = []
+    to_insert = []
+
+    for img_data in imgs:
+        xref = img_data[0]
+        #print(img_data)
+        orig_img = doc.extract_image(xref)
+        to_remove_xrefs.append(xref)
+        bbox = page.get_image_bbox(img_data)
+        #print(bbox)
+
+        imgfd = io.BytesIO()
+        imgfd.write(orig_img["image"])
+        pil_image = Image.open(imgfd)
+        pil_image.load()
+        # TODO: if greyscale or 1bit, treat differently
+        # TODO: force 1bit mode?
+        #print('image mode', pil_image.mode)
+        #print('image size', pil_image.size)
+
+        imgfd.close()
+
+        dpi = orig_img['xres']
+
+        try:
+            mrc_gen = create_mrc_hocr_components(pil_image, hocr_word_data,
+        #mrc_gen = create_mrc_hocr_components(pil_image, [],
+                denoise_mask=DENOISE_FAST,
+                bg_downsample=3
+                )
+        except:
+            print("An exception occurredRobert")
+
+        fg_slope = 44500
+        bg_slope = 44250
+        # with pillow
+        #mask_f, bg_f, bg_s, fg_f, fg_s = encode_mrc_images(mrc_gen,
+        #        jpeg2000_implementation=JPEG2000_IMPL_PILLOW,
+        #        bg_compression_flags=['quality_mode:"rates";quality_layers:[250]'],
+        #        #fg_compression_flags=['quality_mode:"rates";quality_layers:[300]'],
+        #        fg_compression_flags=[''],
+        #        )
+
+        # with jpegoptim
+        #mask_f, bg_f, bg_s, fg_f, fg_s = encode_mrc_images(mrc_gen,
+        #        mrc_image_format=COMPRESSOR_JPEG,
+        #        bg_compression_flags=['-S30'],
+        #        fg_compression_flags=['-S20'],
+        #        )
+
+        mask_f, bg_f, bg_s, fg_f, fg_s = encode_mrc_images(mrc_gen,
+                jpeg2000_implementation=JPEG2000_IMPL_KAKADU,
+                bg_compression_flags=['-slope', str(bg_slope)],
+                #fg_compression_flags=['-slope', str(fg_slope)],
+                fg_compression_flags=['-com','hoi'],
+                )
+
+        # TODO: maybe we can replace the existing image with the background image
+        # here
+        bg_contents = open(bg_f, 'rb').read()
+        fg_contents = open(fg_f, 'rb').read()
+        mask_contents = open(mask_f, 'rb').read()
+
+        os.remove(mask_f)
+        os.remove(bg_f)
+        os.remove(fg_f)
+
+        to_insert.append([
+            {'bbox': bbox, 'stream': bg_contents, 'mask': None, 'overlay': False},
+            {'bbox': bbox, 'stream': fg_contents, 'mask': mask_contents, 'overlay': True}
+        ])
+
+
+    page.clean_contents()
+    for xref in to_remove_xrefs:
+        imgs = page.get_images(full=True)
+        for img_data in imgs:
+            if img_data[0] == xref:
+                remove_images(doc, page, [img_data[7]])
+    page.clean_contents()
+
+    for insert in to_insert:
+        img1 = insert[0]
+        img2 = insert[1]
+        page.insert_image(img1['bbox'], stream=img1['stream'],
+                mask=img1['mask'], overlay=img1['overlay'], alpha=0)
+        page.insert_image(img2['bbox'], stream=img2['stream'],
+                mask=img2['mask'], overlay=img2['overlay'], alpha=0)
+        #page.clean_contents()
+
+    page.clean_contents()
+
+log = logging.getLogger(__name__)
+DEBUG = False
+
+@hookimpl
+def add_options(parser):
+    pass
+
+@hookimpl
+def check_options(options):
+    pass
+
+@hookimpl
+def optimize_pdf(
+    input_pdf: Path,
+    output_pdf: Path,
+    context: PdfContext,
+    executor: Executor,
+    linearize: bool,
+) -> Tuple[Path, Sequence[str]]:
+    save_settings = dict(
+        linearize=linearize,
+        **get_pdf_save_settings(context.options.output_type),
+    )
+    result_path = optimizeR(input_pdf, output_pdf, context, save_settings, executor)
+    messages = []
+    if context.options.optimize == 0:
+        messages.append("Optimization was disabled.")
+    else:
+        image_optimizers = {
+            'jbig2': jbig2enc.available(),
+            'pngquant': pngquant.available(),
+        }
+        for name, available in image_optimizers.items():
+            if not available:
+                messages.append(
+                    f"The optional dependency '{name}' was not found, so some image "
+                    f"optimizations could not be attempted."
+                )
+    return result_path, messages
+
+
+@hookimpl
+def is_optimization_enabled(context: PdfContext) -> bool:
+    return True
+
+# © 2018 James R. Barlow: github.com/jbarlow83
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+"""Post-processing image optimization of OCR PDFs."""
+
+
+
+log = logging.getLogger(__name__)
+
+
+
+DEFAULT_EXECUTOR = SerialExecutor()
+
+
+def optimizeR(
+    input_file: Path,
+    output_file: Path,
+    context,
+    save_settings,
+    executor: Executor = DEFAULT_EXECUTOR,
+) -> Path:
+    options = context.options
+    log.info(
+        "In OptimizeR aanbeland"
+    )
+
+    tmpd = tempfile.mkdtemp()
+    pdfmeta = os.path.join(tmpd, 'pdfmeta.json')
+    pdfhocr = os.path.join(tmpd, 'pdfhocr.html')
+
+    if DEBUG:
+        stde = sys.stderr
+    else:
+        stde = open(os.devnull, 'wb')
+
+    out = check_output(['pdf-metadata-json', input_file], stderr=stde)
+    with open(pdfmeta, 'wb+') as fd:
+        fd.write(out)
+
+    out = check_output(['pdf-to-hocr', '-f', input_file, '-J', pdfmeta], stderr=stde)
+    with open(pdfhocr, 'wb+') as fd:
+        fd.write(out)
+
+    doc = fitz.open(input_file)
+    hocr_iter = pdfhocr
+    outfile = output_file
+    
+    for page in doc:
+        hocr_page = next(hocr_iter)
+        hocr_word_data = hocr_page_to_word_data(hocr_page)
+    
+        compress_page_images(doc, page, hocr_word_data=hocr_word_data)
+    
+        page.clean_contents()
+    
+    doc.save(outfile, deflate=True, pretty=True, garbage=2)
+
+    oldsize = os.path.getsize(input_file)
+    newsize = os.path.getsize(output_file)
+    compression_ratio  = oldsize / newsize
+    print('Compression factor:', compression_ratio, file=sys.stderr)
+
+    input_size = input_file.stat().st_size
+    output_size = output_file.stat().st_size
+    if output_size == 0:
+        raise OutputFileAccessError(
+            f"Output file not created after optimizing. We probably ran "
+            f"out of disk space in the temporary folder: {tempfile.gettempdir()}."
+        )
+    savings = 1 - output_size / input_size
+
+    if savings < 0:
+        log.info(
+            "Image optimization did not improve the file - "
+            "optimizations will not be used"
+        )
+        return input_file
+    else:
+        return output_file
+
