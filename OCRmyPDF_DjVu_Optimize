@@ -9,6 +9,7 @@ import itertools
 import logging
 import os
 import sys
+import importlib
 
 import argparse
 from pathlib import Path
@@ -132,7 +133,9 @@ def compress_page_images(doc, page, hocr_word_data=[]):
         dpi = orig_img['xres']
 
         djvu.require_cli()
+        numpy_store = sys.modules['numpy'] 
         gamera.init()
+        sys.modules['numpy'] = numpy_store
         mrc_gen = create_mrc_hocr_components(pil_image, hocr_word_data,
         #mrc_gen = create_mrc_hocr_components(pil_image, [],
             denoise_mask=DENOISE_FAST,
