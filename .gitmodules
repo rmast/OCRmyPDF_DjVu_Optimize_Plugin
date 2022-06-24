@@ -1,0 +1,4 @@
+[submodule "didjvu"]
+	path = didjvu
+	url = https://github.com/FriedrichFroebel/didjvu.git
+	branch = python3
