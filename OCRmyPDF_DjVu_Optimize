@@ -10,18 +10,6 @@ import logging
 import os
 import sys
 
-
-from .didjvu.lib import djvu_support as djvu
-from .didjvu.lib import filetype
-from .didjvu.lib import fs
-from .didjvu.lib import gamera_support as gamera
-from .didjvu.lib import ipc
-from .didjvu.lib import templates
-from .didjvu.lib import temporary
-from .didjvu.lib import utils
-from .didjvu.lib import xmp
-from .didjvu.lib import didjvu
-
 import argparse
 from pathlib import Path
 from typing import (
@@ -66,7 +54,7 @@ from pikepdf import (
 )
 from PIL import Image
 
-from ocrmypdf._jobcontext import PdfContext
+#from ocrmypdf._jobcontext import PdfContext
 from ocrmypdf.exceptions import OutputFileAccessError
 from ocrmypdf.helpers import IMG2PDF_KWARGS, safe_symlink
 
@@ -78,8 +66,24 @@ from hocr.parse import hocr_page_iterator, hocr_page_to_word_data
 from internetarchivepdf.const import DENOISE_FAST, JPEG2000_IMPL_KAKADU, \
     JPEG2000_IMPL_PILLOW, COMPRESSOR_JPEG, COMPRESSOR_JPEG2000
 #from internetarchivepdf.mrc import create_mrc_hocr_components
-from internetarchivepdf.mrc import encode_mrc_images
 
+sys.path.append(os.path.dirname(os.path.realpath(__file__)) + "/didjvu/lib")
+
+
+#sys.path.insert(0, './didjvu/lib')
+
+from didjvu.lib import djvu_support as djvu
+#from . import filetype
+#from . import fs
+from didjvu.lib import gamera_support as gamera
+from didjvu.lib import ipc
+#from . import templates
+from didjvu.lib import temporary
+from didjvu.lib import utils
+#from . import xmp
+from didjvu.lib import didjvu
+
+from internetarchivepdf.mrc import encode_mrc_images
 # TODO:
 # - Deal with arbitrary rotation and matrix sizes when placing the image back
 # - Decide if we want to ignore transparent images alltogether
@@ -127,16 +131,13 @@ def compress_page_images(doc, page, hocr_word_data=[]):
 
         dpi = orig_img['xres']
 
-        try:
-            djvu.require_cli()
-            gamera.init()
-            mrc_gen = create_mrc_hocr_components(pil_image, hocr_word_data,
+        djvu.require_cli()
+        gamera.init()
+        mrc_gen = create_mrc_hocr_components(pil_image, hocr_word_data,
         #mrc_gen = create_mrc_hocr_components(pil_image, [],
-                denoise_mask=DENOISE_FAST,
-                bg_downsample=3
-                )
-        except:
-            print("An exception occurredRobert")
+            denoise_mask=DENOISE_FAST,
+            bg_downsample=3
+            )
 
         fg_slope = 44500
         bg_slope = 44250
@@ -198,7 +199,7 @@ def compress_page_images(doc, page, hocr_word_data=[]):
     page.clean_contents()
 
 log = logging.getLogger(__name__)
-DEBUG = False
+DEBUG = True
 
 @hookimpl
 def add_options(parser):
@@ -287,9 +288,10 @@ def optimizeR(
     out = check_output(['pdf-to-hocr', '-f', input_file, '-J', pdfmeta], stderr=stde)
     with open(pdfhocr, 'wb+') as fd:
         fd.write(out)
+    
+    hocr_iter = hocr_page_iterator(pdfhocr)
 
     doc = fitz.open(input_file)
-    hocr_iter = pdfhocr
     outfile = output_file
     
     for page in doc:
@@ -325,6 +327,15 @@ def optimizeR(
     else:
         return output_file
 
+class OptionsStruct(NamedTuple):
+    subsample: int
+    slices: None
+    crcb: int
+
+
+subsample3 = OptionsStruct(3,[100],djvu.CRCB.full)
+subsample12 = OptionsStruct(12,[100],djvu.CRCB.full)
+
 # TODO: Reduce amount of memory active at one given point (keep less images in
 # memory, write to disk sooner, etc), careful with numpy <-> PIL conversions
 def create_mrc_hocr_components(image, hocr_word_data,
@@ -356,22 +367,24 @@ def create_mrc_hocr_components(image, hocr_word_data,
 
     gamera_image = gamera._from_pil(image)
     mask2 = gamera.methods['djvu'](gamera_image)
-    mask3 = _image_conversion.to_greyscale(mask2)
+    mask3 = mask2.to_greyscale()
+    #mask3 = _image_conversion.to_greyscale(mask2)
     mask = gamera.to_pil_1bpp(mask3)
+    import numpy as np
     mask_arr = np.array(mask)
 
     mask_inv = np.invert(mask_arr)
 
     yield mask_inv
 
-    fg_djvu = didjvu.make_layer(gamera_image, mask3, subsample_fg)
+    fg_djvu = didjvu.make_layer(gamera_image, mask3, didjvu.subsample_fg, subsample12)
     fg_ppm  = djvu_to_ppm(fg_djvu)
     foreground_arr = np.array(Image.open(fg_ppm))
 
     yield foreground_arr
     foreground_arr = None
 
-    bg_djvu = didjvu.make_layer(gamera_image, mask3, subsample_bg)
+    bg_djvu = didjvu.make_layer(gamera_image, mask3, didjvu.subsample_bg, subsample3)
     bg_ppm  = djvu_to_ppm(bg_djvu)
     background_arr = np.array(Image.open(bg_ppm))
 
@@ -392,7 +405,7 @@ def main(infile, outfile):
     infile = Path(infile)
 
     with TemporaryDirectory() as tmpdir:
-        context = PdfContext(options, tmpdir, infile, None, None)
+        context = PdfContext(None, tmpdir, infile, None, None)
         tmpout = Path(tmpdir) / 'out.pdf'
         optimizeR(
             infile,
