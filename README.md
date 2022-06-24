@@ -1,4 +1,4 @@
-# OCRmyPDF_DjVu_Optimize
+# OCRmyPDF_DjVu_Optimize_Plugin
 didjvu inspired optimization plugin for OCRmyPDF with Gamera-4 djvu binarization and c44 masking
 
 References:
