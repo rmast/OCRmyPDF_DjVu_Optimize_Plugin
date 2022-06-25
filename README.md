@@ -2,6 +2,7 @@
 didjvu inspired optimization plugin for OCRmyPDF with Gamera-4 djvu binarization and c44 masking
 
 References:
+- https://github.com/internetarchive/archive-pdf-tools/tree/pdf-metadata-tooling
 - https://github.com/jwilk/didjvu (Python 3 branch https://github.com/FriedrichFroebel/didjvu)
 - https://github.com/ocrmypdf/OCRmyPDF
 - https://github.com/hsnr-gamera/gamera-4
