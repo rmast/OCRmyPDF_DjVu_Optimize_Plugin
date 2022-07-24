@@ -4,12 +4,21 @@
 # As some DjVu-software-patents have expired there might even be some additional room for improvement for anyone who is able to understand them deeply.
 
 """Built-in plugin to implement PDF page optimization."""
-
+import statistics
 import itertools
 import logging
 import os
 import sys
+from sauvola import binarise_sauvola
+import matplotlib.pyplot as plt
 
+import mpl_toolkits.mplot3d as m3d
+from skimage.restoration import estimate_sigma
+import warnings
+from sklearn import linear_model
+import numpy as np
+import matplotlib
+matplotlib.use("TkAgg")
 import argparse
 from pathlib import Path
 from typing import (
@@ -24,6 +33,9 @@ from typing import (
     Sequence,
     Tuple,
 )
+
+import pandas as pd
+
 from ocrmypdf import PdfContext, hookimpl
 from ocrmypdf._concurrent import Executor, SerialExecutor
 from ocrmypdf._exec import jbig2enc, pngquant
@@ -36,7 +48,7 @@ import os.path
 import tempfile
 import shutil
 import threading
-from collections import defaultdict
+from collections import defaultdict, Counter
 from os import fspath
 from zlib import compress
 
@@ -362,15 +374,30 @@ def create_mrc_hocr_components(image, hocr_word_data,
     Returns a tuple of the components, as numpy arrays: (mask, foreground,
     background)
     """
+    #npimage = np.array(image.convert('RGB'),dtype=np.byte)
+    grayimg = image
+    if image.mode != 'L':
+        #t = time()
+        grayimg = image.convert('L')
+        #if timing_data is not None:
+        #    timing_data.append(('grey_conversion', time() - t))
 
     width_, height_ = image.size
+
+    mask_arr = np.array(Image.new('1', image.size))
+
+    # Modifies mask_arr in place
+    create_hocr_mask(grayimg, image, mask_arr, hocr_word_data, downsample=downsample,
+                     dpi=dpi, timing_data=timing_data)
+    grayimgf = np.array(grayimg, dtype=np.float32)
+
+    #width_, height_ = image.size
 
     gamera_image = gamera._from_pil(image)
     mask2 = gamera.methods['djvu'](gamera_image)
     mask3 = mask2.to_greyscale()
     #mask3 = _image_conversion.to_greyscale(mask2)
     mask = gamera.to_pil_1bpp(mask3)
-    import numpy as np
     mask_arr = np.array(mask)
 
     mask_inv = np.invert(mask_arr)
@@ -390,6 +417,193 @@ def create_mrc_hocr_components(image, hocr_word_data,
 
     yield background_arr
     return
+
+def create_hocr_mask(img, predataimage, mask_arr, hocr_word_data, downsample=None, dpi=None, timing_data=None):
+    image_width, image_height = img.size
+    np_img = np.array(img)
+
+    #t = time()
+
+    for paragraph in hocr_word_data:
+        for line in paragraph['lines']:
+            coords = line['bbox']
+
+            line_text = ' '.join([word['text'] for word in line['words']])
+            line_confs = [word['confidence'] for word in line['words']]
+            line_conf = sum(line_confs) / len(line_confs)
+
+            if line_text.strip() == '' or line_conf < 20:
+                continue
+
+            if downsample is not None:
+                coords = [int(x/downsample) for x in coords]
+            else:
+                coords = [int(x) for x in coords]
+
+            left, top, right, bottom = coords
+            # This can happen if we downsample and round to int
+            if left == right or top == bottom:
+                continue
+
+            if (left >= right) or (top >= bottom):
+                print('Invalid bounding box: (%d, %d, %d, %d)' % (left, top, right, bottom), file=sys.stderr)
+                continue
+
+            if (left < 0) or (right > image_width) or (top < 0) or (bottom > image_height):
+                print('Invalid bounding box outside image: (%d, %d, %d, %d)' % (left, top, right, bottom), file=sys.stderr)
+                continue
+
+            new_img = np.array(predataimage.crop((left, top, right, bottom)))
+
+            new_imgt = new_img.transpose(2, 0, 1).reshape(3, -1)
+            new_imgt2 = new_imgt.transpose()
+            new_imgt2R = new_imgt2[:, [0,1]]
+            new_imgt2B = new_imgt2[:, [1,2]]
+            new_imgt2RB = new_imgt2[:, [0, 2]]
+
+            c = Counter(map(tuple, new_imgt2))
+            cR = Counter(map(tuple, new_imgt2R))
+            cB = Counter(map(tuple, new_imgt2B))
+            cRB = Counter(map(tuple, new_imgt2RB))
+            res = np.c_[np.array(list(c.keys())), list(c.values())].T.T
+            #np.savetxt("/home/rmast/res.txt", res)
+
+            resR = np.c_[np.array(list(cR.keys())), list(cR.values())].T.T
+            #np.savetxt("/home/rmast/resR.txt", resR)
+            resB = np.c_[np.array(list(cB.keys())), list(cB.values())].T.T
+            resRB = np.c_[np.array(list(cRB.keys())), list(cRB.values())].T.T
+            r = res[:,[0]]
+            rR = resR[:, [0]]
+            #rRB = resRB[:, [0]]
+
+            g = res[:,[1]]
+            gR = resR[:,[1]]
+            swR = resR[:,[2]].reshape(-1)
+            gB = resB[:, [0]]
+            bB = resB[:, [1]]
+            swB = resB[:, [2]].reshape(-1)
+            ols = linear_model.LinearRegression()
+            modelR = ols.fit(rR, gR, swR)
+            responseR = modelR.predict(rR)
+
+            ############################################## Evaluate ############################################
+
+            r2 = modelR.score(rR, gR, swR)
+
+            modelB = ols.fit(bB, gB, swB)
+            responseB = modelB.predict(bB)
+
+            ############################################## Evaluate ############################################
+
+            b2 = modelB.score(bB, gB, swB)
+
+
+            plt.style.use('default')
+            plt.style.use('ggplot')
+
+            fig, ax = plt.subplots(figsize=(4, 4))
+            #fig, ax = plt.subplots(gridspec_kw = {'height_ratios': swR})
+            ax.plot(rR, responseR, color='k', label='Regression model')
+            ax.scatter(rR, gR, swR, edgecolor='k', facecolor='grey', alpha=0.7, label='Sample data')
+            ax.set_ylabel(coords, fontsize=14)
+            ax.set_xlabel(line_text, fontsize=14)
+            ax.text(0.8, 0.1, 'aegis4048.github.io', fontsize=13, ha='center', va='center',
+                    transform=ax.transAxes, color='grey', alpha=0.5)
+#            ax.legend(facecolor='white', fontsize=11)
+            ax.set_title('$R^2= %.2f$' % r2, fontsize=18)
+
+            fig.tight_layout()
+            plt.draw()
+            plt.show()
+            plt.draw()
+
+            np_lineimg = np_img[top:bottom,left:right]
+            # Simple grayscale invert
+            np_lineimg_invert = 255 - np.copy(np_lineimg)
+
+            # XXX: If you tweak k, you must tweak the various ratio and sigma's
+            # based on the test images
+            k = 0.1
+            thres = threshold_image(np_lineimg, dpi, k)
+            ones = np.count_nonzero(thres)
+            zero = (img.size[0] * img.size[1]) - ones
+            ratio = (ones/(zero+ones))*100
+
+            thres_invert = threshold_image(np_lineimg_invert, dpi, k)
+            ones_i = np.count_nonzero(thres_invert)
+            zero_i = (img.size[0] * img.size[1]) - ones
+            inv_ratio = (ones_i/(zero_i+ones_i))*100
+
+            if ratio < 0.3 or inv_ratio < 0.3:
+                th = None
+
+                if inv_ratio > 0.2 and ratio < 0.2:
+                    th = thres
+                else:
+                    # mean_estimate_sigma is expensive, so let's only do it if
+                    # we need to
+
+                    ratio_sigma = mean_estimate_sigma(thres)
+                    inv_ratio_sigma = mean_estimate_sigma(thres_invert)
+
+                    # Prefer ratio over inv_ratio by a bit
+                    if inv_ratio < 0.3 and inv_ratio < ratio and \
+                    (inv_ratio_sigma < ratio_sigma or \
+                    (ratio_sigma < 0.1 and inv_ratio_sigma < 0.1)):
+                        th = thres_invert
+                    elif ratio < 0.2:
+                        th = thres
+            else:
+                perc_larger = 0.
+                if inv_ratio != 0.0:
+                    perc_larger = (ratio / inv_ratio) * 100
+                if perc_larger < 50:
+                    th = thres
+                else:
+                    th = thres_invert
+                if th is not None:
+                    mask_arr[top:bottom, left:right] = th
+
+# skimage throws useless UserWarnings in various functions
+def mean_estimate_sigma(arr):
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        return np.mean(estimate_sigma(arr))
+
+
+def threshold_image(img, dpi, k=0.34):
+    """
+    Perform Sauvola binarisation on the given image
+
+    Args:
+
+    * img (np.ndarray): input image array
+    * dpi (int): dpi for Sauvola, used to calculate window size if not None
+    * k (float): k parameter, defaults to 0.34
+
+    Returns binarised numpy.ndarray
+    """
+    window_size = 51
+
+    if dpi is not None:
+        window_size = int(dpi / 4)
+        if window_size % 2 == 0:
+            window_size += 1
+
+    h, w = img.shape
+    out_img = np.ndarray(img.shape, dtype=np.bool)
+    out_img = np.reshape(out_img, w * h)
+    in_img = np.reshape(img, w * h)
+
+    binarise_sauvola(in_img, out_img, w, h, window_size, window_size, k, 128)
+    out_img = np.reshape(out_img, (h, w))
+    # TODO: optimise this, we can do it in binarise_sauvola
+    out_img = np.invert(out_img)
+
+    return out_img
+
+    #if timing_data is not None:
+        #timing_data.append(('hocr_mask_gen', time() - t))
 
 def djvu_to_ppm(djvu_file):
      # TODO: Use Multichunk.
