@@ -44,8 +44,9 @@ for x in result:
 
   #ret = pt.image_to_boxes(resized_img, lang="nld", config="--psm 7")
   #ret = pt.image_to_data(resized_img, lang="nld+lat+Latin+eng", config="--psm 7", output_type=pt.Output.DICT)
+  #oem=tesserocr.OEM.TESSERACT_ONLY
   #print(ret)
-  with tesserocr.PyTessBaseAPI(lang='nld+lat+Latin+eng') as api:
+  with tesserocr.PyTessBaseAPI(lang='nld+lat+Latin+eng',oem=tesserocr.OEM.DEFAULT) as api:
     img2 = np.uint8(resized_img) 
     im = Image.fromarray(np.uint8(resized_img))
     api.SetImage(im)
