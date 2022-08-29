@@ -67,7 +67,7 @@ cdef class PyRectangle:
                 #self.c_rect = Tetragon(a[0], a[2], a[0], a[3], a[1], a[3], a[1] , a[2])
             self.c_rect.OtsuThresholdTetragon(self.c_pict, thresholds, edgemean);
                 #sys.stdout.write("Hello %s!" % thresholds)
-            print(a,thresholds,edgemean)
+            print(t,thresholds,edgemean)
 
         #for x in result[1]:
             #for a in x:
