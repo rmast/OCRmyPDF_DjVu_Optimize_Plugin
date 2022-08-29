@@ -50,8 +50,7 @@ cdef class PyRectangle:
         cdef int c2
         cdef int c3
 
-        for x in result[0]:
-            for a in x:
+        for t in result:
                 #it=a.begin()
                 #c0 = dereference(it)
                 #preincrement(it)
@@ -64,10 +63,11 @@ cdef class PyRectangle:
                 #print(c1)
                 #print(c2)
                 #print(c3)
-                self.c_rect = Tetragon(a[0], a[2], a[0], a[3], a[1], a[3], a[1] , a[2])
-                self.c_rect.OtsuThresholdTetragon(self.c_pict, thresholds, edgemean);
+            self.c_rect = Tetragon(t[0], t[1], t[2], t[3], t[4], t[5], t[6] , t[7])
+                #self.c_rect = Tetragon(a[0], a[2], a[0], a[3], a[1], a[3], a[1] , a[2])
+            self.c_rect.OtsuThresholdTetragon(self.c_pict, thresholds, edgemean);
                 #sys.stdout.write("Hello %s!" % thresholds)
-                print(a,thresholds,edgemean)
+            print(a,thresholds,edgemean)
 
         #for x in result[1]:
             #for a in x:

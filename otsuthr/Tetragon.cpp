@@ -130,7 +130,7 @@ Tetragon::Tetragon(int x1,
 // returns bordermean.
 int Tetragon::HistogramTetragon(robert::FromPicture fp1, int channel, int *histogram) {
   int num_channels = pixGetDepth(fp1._src_pix) / 8;
-  channel = ClipToRange(channel, 0, num_channels - 1);
+  channel = tesseract::ClipToRange(channel, 0, num_channels - 1);
   int bordercount = 0;
   float bordersum = 0;
   memset(histogram, 0, sizeof(*histogram) * tesseract::kHistogramSize);
