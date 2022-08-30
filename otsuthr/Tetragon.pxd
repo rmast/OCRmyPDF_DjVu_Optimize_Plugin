@@ -12,12 +12,14 @@ cdef extern from "FromPicture.cpp":
 cdef extern from "FromPicture.h" namespace "robert":
     cdef cppclass FromPicture:
         FromPicture() except +
-        FromPicture(Pix *, int) except +
+        FromPicture(Pix *) except +
 
 cdef extern from "Tetragon.h" namespace "robert":
     cdef cppclass Tetragon:
         Tetragon() except +
         Tetragon(int, int, int, int, int, int, int, int) except +
-        void OtsuThresholdTetragon(FromPicture, vector[int]  ,vector[int]) except +
+        void ThresholdTetragonToPix(FromPicture , int *, int *, int *) except +
+        void OtsuThresholdTetragon(FromPicture, int *, int *, int *) except +
+
 
 

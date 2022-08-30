@@ -37,7 +37,7 @@ cdef class PyRectangle:
             if plaatje == NULL:
                 with gil:
                     raise RuntimeError('Error reading image')
-        self.c_pict = FromPicture(plaatje, num_channels)
+        self.c_pict = FromPicture(plaatje)
 
 
     def otsu_threshold_tetragon(self, result): 
@@ -49,26 +49,21 @@ cdef class PyRectangle:
         cdef int c1
         cdef int c2
         cdef int c3
+        cdef int bestchannel
+        cdef int threshold
+        cdef int mean
+        cdef int *pbestchannel
+        cdef int *pthreshold
+        cdef int *pmean
 
+        pbestchannel = &bestchannel
+        pthreshold = &threshold
+        pmean = &mean
         for t in result:
-                #it=a.begin()
-                #c0 = dereference(it)
-                #preincrement(it)
-                #c1 = dereference(it)
-                #preincrement(it)
-                #c2 = dereference(it)
-                #preincrement(it)
-                #c3 = dereference(it)
-                #print(c0)
-                #print(c1)
-                #print(c2)
-                #print(c3)
             self.c_rect = Tetragon(t[0], t[1], t[2], t[3], t[4], t[5], t[6] , t[7])
-                #self.c_rect = Tetragon(a[0], a[2], a[0], a[3], a[1], a[3], a[1] , a[2])
-            self.c_rect.OtsuThresholdTetragon(self.c_pict, thresholds, edgemean);
-                #sys.stdout.write("Hello %s!" % thresholds)
+            self.c_rect.OtsuThresholdTetragon(self.c_pict, pbestchannel, pthreshold, pmean)
             print(t,thresholds,edgemean)
-
+            self.c_rect.ThresholdTetragonToPix(self.c_pict, pbestchannel, pthreshold, pmean)
         #for x in result[1]:
             #for a in x:
                 #for b in a:
